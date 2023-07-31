@@ -194,8 +194,6 @@ def main(args, config):
     print(f"Min/Max num nodes train graphs = ", np.min([len(g.nodes()) for g in graphs_train_nx]), np.max([len(g.nodes()) for g in graphs_train_nx]))
     print()
 
-
-
     graphs_train, graphs_val, graphs_test = convert_nx_to_world([graphs_train_nx, graphs_val_nx, graphs_test_nx])
 
     # Init model
@@ -203,7 +201,7 @@ def main(args, config):
     model = AHK_graphon(graphs_train[0].sig, binbounds)
     model.rand_init()
 
-    train(config, model, graphs_train[:50], graphs_val, graphs_test)
+    train(config, model, graphs_train[:20], graphs_val, graphs_test)
 
     generated_graphs = sample_data(model, n=10, minnodes=5, maxnodes=30)
     generated_graphs_nx = [nx.Graph(g.to_nx()) for g in generated_graphs]
@@ -213,6 +211,10 @@ def main(args, config):
 
 
 if __name__ == '__main__':
+    """
+    Example usage (background execution):
+        nohup python main.py --dataset_name planar > planar.out 2>&1 &
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset_name', type=str, default='sbm', help='dataset name to train on')
     args = parser.parse_args()

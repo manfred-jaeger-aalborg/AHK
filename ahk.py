@@ -2,7 +2,7 @@ import numpy as np
 import networkx as nx
 import math
 
-from AHK.utils import World,Signature,enumerate_unary_worlds
+from utils import World,Signature,enumerate_unary_worlds
 
 
 import itertools

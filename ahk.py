@@ -2,7 +2,7 @@ import numpy as np
 import networkx as nx
 import math
 
-from AHK.utils import World,Signature,enumerate_unary_worlds
+from AHK.utils import World,Signature,enumerate_unary_worlds,splitprobs,split3
 
 
 import itertools
@@ -17,11 +17,12 @@ class AHK_graphon():
         # binbounds is an array b of the form 0=b[0]<b[1]<...<b[g-1]<b[g]=1
         # g then is the granularity, i.e., number of bins
         self.minus = minus # whether this is a AHK^- model
+        self.numatts=len(signature.unaries)
         self.binbounds=binbounds
         self.granularity=  len(binbounds)-1 # number of partition elements (common for all u variables)
         self.signature = signature
         self.directed=signature.directed
-        self.attrange=range(len(self.signature.unaries))
+        self.attrange=range(self.numatts)
         
         """
         for self.minus=False:
@@ -63,12 +64,12 @@ class AHK_graphon():
         return np.array(list(self.binbounds[i]-self.binbounds[i-1] for i in range(1,len(self.binbounds))))
         
         
-    def rand_init(self):
+    def rand_init(self,rng):
         for i in range(len(self.f1)):
-            self.f1[i]=np.random.random(self.f1[i].shape)
+            self.f1[i]=rng.random(self.f1[i].shape)
             for g in range(self.granularity):
                 self.f1[i][g,:]=self.f1[i][g,:]/np.sum(self.f1[i][g,:])
-        self.f2=np.random.random(self.f2.shape)
+        self.f2=rng.random(self.f2.shape)
         for k in range(self.signature.nb):
             if self.directed:
                 self.f2[:,:,k,0]=np.triu(self.f2[:,:,k,0])
@@ -268,26 +269,44 @@ class AHK_graphon():
                         qprob=1 #conditional probability of query qs[q]
                         for at in qs[q]:
                             if len(at)==3:
-                                bofarg=b[np.where(pi==at[1])]
-                                qfac=self.f1[at[0]][bofarg,at[2]]
+                                if w.unaries[at[1],at[0]] !=-1:
+                                    if w.unaries[at[1],at[0]] == at[2]:
+                                        qfac=1
+                                    else:
+                                        qfac=0
+                                else:    
+                                    bofarg=b[np.where(pi==at[1])]
+                                    qfac=self.f1[at[0]][bofarg,at[2]]
 
                             if len(at)==4:
                                 piidx1=np.where(pi==at[1])
                                 piidx2=np.where(pi==at[2])
                                 bofarg1=b[piidx1]
                                 bofarg2=b[piidx2]
-                                if self.directed:
-                                    if piidx1<piidx2:
-                                        qfac=self.f2[bofarg1,bofarg2,at[0],0]
+                                
+                                if w.binaries[at[1],at[2],at[0]] ==1:
+                                    if at[-1]:
+                                        qfac=1
                                     else:
-                                        qfac=self.f2[bofarg2,bofarg1,at[0],1]
-                                else:
-                                    if piidx1<piidx2:
-                                        qfac=self.f2[bofarg1,bofarg2,at[0]]
+                                        qfac=0
+                                elif  w.binaries[at[1],at[2],at[0]] ==0:    
+                                    if not at[-1]:
+                                        qfac=1
                                     else:
-                                        qfac=self.f2[bofarg2,bofarg1,at[0]]
-                                if not at[-1]:
-                                    qfac=1-qfac
+                                        qfac=0    
+                                else:    
+                                    if self.directed:
+                                        if piidx1<piidx2:
+                                            qfac=self.f2[bofarg1,bofarg2,at[0],0]
+                                        else:
+                                            qfac=self.f2[bofarg2,bofarg1,at[0],1]
+                                    else:
+                                        if piidx1<piidx2:
+                                            qfac=self.f2[bofarg1,bofarg2,at[0]]
+                                        else:
+                                            qfac=self.f2[bofarg2,bofarg1,at[0]]
+                                    if not at[-1]:
+                                        qfac=1-qfac
                             qprob*=qfac
                         tq[q]+=qprob*pi_b_prob
                     
@@ -387,9 +406,11 @@ class AHK_graphon():
         bweights = np.max(BP,axis=1)
         return bweights
     
-    def importance_sample(self,w,return_pibs=False,**kwargs):
+    def importance_sample(self,w,rng,return_pibs=False,trace=False,**kwargs):
         """
         w: an incompletely observed world
+        rng: a random generator
+        
         possible keyword args:
         
         query=q:
@@ -449,7 +470,10 @@ class AHK_graphon():
         
         nochangecount=0
         lastvalue=1
-        trace=[]
+        if trace:
+            trace=[]
+        else:
+            trace=None
 
         num_pibs=None
         if return_pibs:
@@ -462,10 +486,10 @@ class AHK_graphon():
         while not terminate:
             sampled+=1
             
-            piprob,pi=self.random_pi(w.n,piweights)
+            piprob,pi=self.random_pi(w.n,piweights,rng)
             #print("pi: ", pi)
              
-            bprob,b=self.random_b_for_pi(pi,BP,UP,bweights)
+            bprob,b=self.random_b_for_pi(pi,BP,UP,bweights,rng)
             #print("b: ", b)
             
             if return_pibs:
@@ -479,34 +503,53 @@ class AHK_graphon():
                 for q in range(len(qs)):
                     qprob=1
                     for at in qs[q]:
-                        if len(at)==3:
-                            bofarg=b[np.where(pi==at[1])]
-                            qfac=self.f1[at[0]][bofarg,at[2]]
+                       if len(at)==3:
+                            if w.unaries[at[1],at[0]] !=-1:
+                                if w.unaries[at[1],at[0]] == at[2]:
+                                    qfac=1
+                                else:
+                                    qfac=0
+                            else:    
+                                bofarg=b[np.where(pi==at[1])]
+                                qfac=self.f1[at[0]][bofarg,at[2]]
 
-                        if len(at)==4:
+                       if len(at)==4:
                             piidx1=np.where(pi==at[1])
                             piidx2=np.where(pi==at[2])
                             bofarg1=b[piidx1]
                             bofarg2=b[piidx2]
-                            if self.directed:
-                                if piidx1<piidx2:
-                                    qfac=self.f2[bofarg1,bofarg2,at[0],0]
+                            if w.binaries[at[1],at[2],at[0]] ==1:
+                                    if at[-1]:
+                                        qfac=1
+                                    else:
+                                        qfac=0
+                            elif  w.binaries[at[1],at[2],at[0]] ==0:    
+                                if not at[-1]:
+                                    qfac=1
                                 else:
-                                    qfac=self.f2[bofarg2,bofarg1,at[0],1]
-                            else:
-                                if piidx1<piidx2:
-                                    qfac=self.f2[bofarg1,bofarg2,at[0]]
+                                    qfac=0    
+                            else:    
+                                if self.directed:
+                                    if piidx1<piidx2:
+                                        qfac=self.f2[bofarg1,bofarg2,at[0],0]
+                                    else:
+                                        qfac=self.f2[bofarg2,bofarg1,at[0],1]
                                 else:
-                                    qfac=self.f2[bofarg2,bofarg1,at[0]]
-                            if not at[-1]:
-                                qfac=1-qfac
-                        qprob*=qfac
+                                    if piidx1<piidx2:
+                                        qfac=self.f2[bofarg1,bofarg2,at[0]]
+                                    else:
+                                        qfac=self.f2[bofarg2,bofarg1,at[0]]
+                                if not at[-1]:
+                                    qfac=1-qfac
+                       qprob*=qfac
 
                     tq[q]+=qprob*worldweight
                     fq[q]+=(1-qprob)*worldweight
-                trace.append(tq/(tq+fq))
+                if trace:
+                    trace.append(tq/(tq+fq))
             else:
-                trace.append(pw/sampled)
+                if trace:
+                    trace.append(pw/sampled)
             # now determine termination:
             if not numsamples==None:
                 terminate=(sampled==numsamples)
@@ -540,7 +583,7 @@ class AHK_graphon():
        
         
         
-    def random_pi(self,n,weights):
+    def random_pi(self,n,weights,rng):
         #return np.random.permutation(n)
         """
         weights is an nxn matrix. The entries weights[i,j] and weights[j,i] represent 
@@ -548,14 +591,14 @@ class AHK_graphon():
         """
         
         #initpi=np.array(range(n)) 
-        initpi=np.random.permutation(n) 
+        initpi=rng.permutation(n) 
         rpi=[]
         piprob=1
         # first two elements:
         i=initpi[0]
         j=initpi[1]
         prob=weights[i,j]/(weights[i,j]+weights[j,i])
-        if np.random.random()<prob:
+        if rng.random()<prob:
             rpi.append(i)
             rpi.append(j)
             piprob*=prob
@@ -578,7 +621,7 @@ class AHK_graphon():
             else:
                 probs=np.ones(len(rpi)+1)/(len(rpi)+1) # in this case no useful sample will be obtained
             ii=np.arange(len(rpi)+1)
-            idx=np.random.choice(ii,p=probs)
+            idx=rng.choice(ii,p=probs)
             
             rpi.insert(idx,i)
             piprob*=probs[idx]
@@ -587,7 +630,7 @@ class AHK_graphon():
             
             
         
-    def random_b_for_pi(self,pi,BP,UP,bweights):
+    def random_b_for_pi(self,pi,BP,UP,bweights,rng):
         """
         bweights is a (granularity x n x n ) matrix containing for each pair (i,j) of nodes and each u-bin 
         a weight
@@ -613,8 +656,9 @@ class AHK_graphon():
             else:
                 bprobs=np.hstack((np.zeros(rb[p-1]),\
                                   np.ones(self.granularity-rb[p-1])/(self.granularity-rb[p-1])))
+            assert np.min(bprobs)>=0, "got negative bprob with probsum {} and bprobs {}".format(probsum,bprobs)
             #print("bprobs #4:", bprobs)
-            sampled=np.random.choice(bvals,p=bprobs)
+            sampled=rng.choice(bvals,p=bprobs)
             rb[p]=sampled
             bp*=bprobs[sampled]
             
@@ -667,7 +711,7 @@ class AHK_graphon():
             loglik+=np.log(self.importance_sample(w,**kwargs)[0])
         return loglik
     
-    def estimate_grad(self,w,learn_bins,num_pi_b=1):
+    def estimate_grad(self,w,rng,learn_bins=False,num_pi_b=1):
         """
         Approximate computation of the gradient of the log-likelihood given by 
         world w. Approximation based on random sample of pi,b combinations using the
@@ -688,8 +732,8 @@ class AHK_graphon():
         # Generate random pi,b pairs:
         pi_b=[]
         for i in range(num_pi_b):
-            ppi,pi=self.random_pi(w.n,piweights)
-            pb,b=self.random_b_for_pi(pi,BP,UP,bweights)
+            ppi,pi=self.random_pi(w.n,piweights,rng)
+            pb,b=self.random_b_for_pi(pi,BP,UP,bweights,rng)
             pi_b.append([pi,b,ppi*pb])
             
         #Initialize: 
@@ -720,9 +764,9 @@ class AHK_graphon():
             v,gvn=self.volume(pi_b[i][1],learn_bins)
             importanceweight=v/(pi_b[i][2])
             
-           
-            g1=list(g1[att] + g1n[att]*importanceweight  for att in self.attrange)
-            trace.append(g1[0]/(i+1))
+            if self.numatts>0:
+                g1=list(g1[att] + g1n[att]*importanceweight  for att in self.attrange)
+                trace.append(g1[0]/(i+1))
 
             #print("gradient b1,b1: ", (g2n)[1,1,0,0], (g2n)[1,1,0,1])            
             #print("weighted g2 gradient b1,b1: ", (g2n*importanceweight)[1,1,0,0], (g2n*importanceweight)[1,1,0,1])
@@ -748,11 +792,11 @@ class AHK_graphon():
         #return g1,g2,gv,np.log(p),trace 
         return g1,g2,gv,np.log(p)
         
-    def estimate_grad_batch(self,batch,learn_bins,num_pi_b=1):
-        gg1,gg2,ggv,p=self.estimate_grad(batch[0],learn_bins,num_pi_b)
+    def estimate_grad_batch(self,batch,rng,learn_bins=False,num_pi_b=1):
+        gg1,gg2,ggv,p=self.estimate_grad(batch[0],rng,learn_bins,num_pi_b)
         #print("batch first p: ", p)
         for i in range(1,len(batch)):
-            gg1add,gg2add,ggvadd,padd=self.estimate_grad(batch[i],learn_bins,num_pi_b)
+            gg1add,gg2add,ggvadd,padd=self.estimate_grad(batch[i],rng,learn_bins,num_pi_b)
             gg1=list(gg1[att]+gg1add[att]  for att in self.attrange)
             gg2+=gg2add
             if learn_bins:
@@ -851,14 +895,13 @@ class AHK_graphon():
         
     
             
-    def sample_world(self,n,**kwargs):
+    def sample_world(self,n,rng,**kwargs):
         if "missing" in kwargs.keys():
             mp=kwargs['missing']
         else:
             mp=0.0
             
-        pi = np.random.permutation(n)
-        rng = np.random.default_rng()
+        pi = rng.permutation(n)
         u_cont=rng.random(n)
         u_cont=np.sort(u_cont)
         b=np.zeros(n,dtype=int)
@@ -874,7 +917,7 @@ class AHK_graphon():
         for att in self.attrange:
             for p in range(n):
                 if rng.random()>mp:
-                    j=np.random.choice(range(self.signature.unaries[att]),p=self.f1[att][b[p],:])
+                    j=rng.choice(range(self.signature.unaries[att]),p=self.f1[att][b[p],:])
                     w.unaries[pi[p],att]=j
                 else:
                     w.unaries[pi[p],att]=-1
@@ -902,7 +945,9 @@ class AHK_graphon():
         return w
                 
 
-    def splitbins(self,settings):
+
+        
+    def splitbins(self):
         # splits the widest bin into two
         bin_to_split=np.argmax(self.get_binlengths())
         print("to split: ", bin_to_split)
@@ -924,50 +969,78 @@ class AHK_graphon():
         # initialzing the two new bins; the marginal distribution should remain unchanged
         for i in self.attrange:
             olddis=self.f1[i][bin_to_split,:]
-            randdis=np.random.random(len(olddis))
-            newf1[i][bin_to_split,:]=randdis*olddis
-            newf1[i][bin_to_split+1,:]=(1-randdis)*olddis
+            new1,new2=splitprobs(olddis)
+            newf1[i][bin_to_split,:]=new1
+            newf1[i][bin_to_split+1,:]=new2
         
         self.f1=newf1
          
         # Splitting f2:
         if self.directed:
                 newf2 = np.zeros((self.granularity,self.granularity,self.signature.nb,2))
-                newf2[0:bin_to_split,0:bin_to_split,:,:]=self.f2[0:bin_to_split,0:bin_to_split,:,:]
-                newf2[bin_to_split+1:,bin_to_split+1:,:]=self.f2[bin_to_split+1:,bin_to_split+1:,:]
-                newf2[0:bin_to_split,bin_to_split+1:,:]=self.f2[0:bin_to_split,bin_to_split+1:,:]
+                if bin_to_split !=0:
+                    newf2[0:bin_to_split,0:bin_to_split,:,:]=self.f2[0:bin_to_split,0:bin_to_split,:,:]
+                if bin_to_split !=self.granularity-2:    
+                    newf2[bin_to_split+2:,bin_to_split+2:,:,:]=self.f2[bin_to_split+1:,bin_to_split+1:,:,:]
+                newf2[0:bin_to_split,bin_to_split+2:,:,:]=self.f2[0:bin_to_split,bin_to_split+1:,:,:]
                 # the former [bin_to_split,bin_to_split,:,:] elements have to be divided 3-ways:
                 # [bin_to_split,bin_to_split,:,:],[bin_to_split,bin_to_split+1,:,:],[bin_to_split+1,bin_to_split+1,:,:]
                 # where the non-diagonal one [bin_to_split,bin_to_split+1,:,:] has twice the weight (volume)
-                randdis=np.random.random(3)
-                randdis/=np.sum(randdis) # now have 3 probabilities adding to 1
-                randdis[1]/=2 # decreasing the probability for the non-diagonal
-                newf2[bin_to_split,bin_to_split,:,:]=randdis[0]*self.f2[bin_to_split,bin_to_split,:,:]
-                newf2[bin_to_split,bin_to_split+1,:,:]=randdis[1]*self.f2[bin_to_split,bin_to_split+1,:,:]
-                newf2[bin_to_split+1,bin_to_split+1,:,:]=randdis[2]*self.f2[bin_to_split+1,bin_to_split+1,:,:]
-                # now splitting the remaining [bin_to_split, j ,:,:] entries
-                for j in range(bin_to_split+2,self.granularity):
-                    randdis=np.random.random()
-                    newf2[bin_to_split,j,:,:]=randdis*self.f2[bin_to_split,j-1,:,:]
-                    newf2[bin_to_split+1,j,:,:]=(1-randdis)*self.f2[bin_to_split,j-1,:,:]
-                # and similarly for the [j,bin_to_split,:,:] entries
-                for j in range(bin_to_split):
-                    randdis=np.random.random()
-                    newf2[j,bin_to_split,:,:]=randdis*self.f2[j,bin_to_split,:,:]
-                    newf2[j,bin_to_split+1,:,:]=(1-randdis)*self.f2[j,bin_to_split,:,:]
+
+                for i in range(self.signature.nb):
+                    for j in (0,1):
+                        newprobs=split3(self.f2[bin_to_split,bin_to_split,i,j])
+                        newf2[bin_to_split,bin_to_split+1,i,j]=newprobs[0]
+                        newf2[bin_to_split,bin_to_split,i,j]=newprobs[1]
+                        newf2[bin_to_split+1,bin_to_split+1,i,j]=newprobs[2]
+                
+                        # now splitting the remaining [bin_to_split, other bins ,:,:] entries
+                        for k in range(bin_to_split+2,self.granularity):
+                            oldp=np.array((self.f2[bin_to_split,k-1,i,j],1-self.f2[bin_to_split,k-1,i,j]))
+                            q1,q2=splitprobs(oldp)
+                            newf2[bin_to_split,k,i,j]=q1[0]
+                            newf2[bin_to_split+1,k,i,j]=q2[0]
+                        # and similarly for the [j,bin_to_split,:,:] entries
+                        for k in range(bin_to_split):
+                            oldp=np.array((self.f2[k,bin_to_split,i,j],1-self.f2[k,bin_to_split,i,j]))
+                            q1,q2=splitprobs(oldp)
+                            newf2[k,bin_to_split,i,j]=q1[0]
+                            newf2[k,bin_to_split+1,i,j]=q2[0]
                 
         else:
                 newf2 = np.zeros((self.granularity,self.granularity,self.signature.nb))
-                newf2[0:bin_to_split,0:bin_to_split,:]=self.f2[0:bin_to_split,0:bin_to_split,:]
+                if bin_to_split !=0:
+                    newf2[0:bin_to_split,0:bin_to_split,:]=self.f2[0:bin_to_split,0:bin_to_split,:]
+                if bin_to_split !=self.granularity-2:    
+                    newf2[bin_to_split+2:,bin_to_split+2:,:]=self.f2[bin_to_split+1:,bin_to_split+1:,:]
+                newf2[0:bin_to_split,bin_to_split+2:,:]=self.f2[0:bin_to_split,bin_to_split+1:,:]
+               
+                for i in range(self.signature.nb):
+                    newprobs=split3(self.f2[bin_to_split,bin_to_split,i])
+                    newf2[bin_to_split,bin_to_split+1,i]=newprobs[0]
+                    newf2[bin_to_split,bin_to_split,i]=newprobs[1]
+                    newf2[bin_to_split+1,bin_to_split+1,i]=newprobs[2]
+
+                    # now splitting the remaining [bin_to_split, other bins ,:,:] entries
+                    for k in range(bin_to_split+2,self.granularity):
+                        oldp=np.array((self.f2[bin_to_split,k-1,i],1-self.f2[bin_to_split,k-1,i]))
+                        q1,q2=splitprobs(oldp)
+                        newf2[bin_to_split,k,i]=q1[0]
+                        newf2[bin_to_split+1,k,i]=q2[0]
+                    # and similarly for the [j,bin_to_split,:,:] entries
+                    for k in range(bin_to_split):
+                        oldp=np.array((self.f2[k,bin_to_split,i],1-self.f2[k,bin_to_split,i]))
+                        q1,q2=splitprobs(oldp)
+                        newf2[k,bin_to_split,i]=q1[0]
+                        newf2[k,bin_to_split+1,i]=q2[0]
         
         self.f2=newf2
-                
-       
+    
         return
         
-    def learn(self,settings,data,**kwargs):
+    def learn_fixed_bins(self,settings,data,rng,**kwargs):
         """
-        Arguments with prefixes ad_ are only for adam, prefixed with gr_ for greedy
+        Arguments with prefixes ad_ are only for adam, prefixed with gr_ for greedy, rms_ for RMSprop
         """
         learn_bins=settings['learn_bins']
         soft=settings['soft']
@@ -996,6 +1069,7 @@ class AHK_graphon():
 
         if method=="greedy":
             gr_lr=settings['gr_lr']
+            gr_lr_dec=settings['gr_lr_dec']
               
         
         assert method=="adam" or method=="greedy" or method=="RMSprop"
@@ -1007,6 +1081,10 @@ class AHK_graphon():
             trace['loglik']=[]
             trace['f1']=[]
             trace['f2']=[]
+            trace['f1grad_norm']=[]
+            trace['f2grad_norm']=[]
+            trace['f1update_norm']=[]
+            trace['f2update_norm']=[]
             
         #self.rand_init()
     
@@ -1061,10 +1139,12 @@ class AHK_graphon():
             epochll=0
             for b in tqdm(range(numbatches)):          
 
-                gf1,gf2,gbb,llbatch=self.estimate_grad_batch(nextbatch,learn_bins,num_pi_b)
+                gf1,gf2,gbb,llbatch=self.estimate_grad_batch(nextbatch,rng,learn_bins,num_pi_b)
                 #print("grad f1: ", gf1[0],'\n')
                 #print("grad f2 (b2,b2): ", gf2[1,1,0,0],gf2[1,1,0,1],'\n')
-                
+                if with_trace:
+                    trace['f1grad_norm'].append(np.linalg.norm(gf1))
+                    trace['f2grad_norm'].append(np.linalg.norm(gf2))
                 epochll+=llbatch
 
                 if method == "adam":
@@ -1085,6 +1165,12 @@ class AHK_graphon():
                         self.f1[att][:,0:-1]=self.f1[att][:,0:-1]+ad_alpha*hatmf1[att]/(np.sqrt(hatvf1[att])+ad_epsilon)
 
                     self.f2=self.f2+ad_alpha*hatmf2/(np.sqrt(hatvf2)+ad_epsilon)
+
+                    if with_trace:
+                        if self.numatts>0:
+                            trace['f1update_norm'].append(np.linalg.norm(ad_alpha*hatmf1[0]/(np.sqrt(hatvf1[0])+ad_epsilon)))
+                        # only the first attribute is recorded in the trace!
+                        trace['f2update_norm'].append(np.linalg.norm(ad_alpha*hatmf2/(np.sqrt(hatvf2)+ad_epsilon)))
                     
                     if learn_bins:
                         mbb=ad_beta1*mbb+(1-ad_beta1)*gbb
@@ -1116,11 +1202,19 @@ class AHK_graphon():
                     if rms_mu>0:
                         bf1=list(rms_mu*bf1[att]+gf1[att]/(np.sqrt(vtildef1[att])+rms_epsilon) for att in self.attrange)
                         bf2=rms_mu*bf2+gf2/(np.sqrt(vtildef2)+rms_epsilon)
-                        self.f1=list(self.f1[att]+rms_gamma*bf1[att] for att in self.attrange)
+                        for att in self.attrange:
+                            self.f1[att][:,0:-1]=self.f1[att][:,0:-1]+rms_gamma*bf1[att]
                         self.f2=self.f2+rms_gamma*bf2
                     else:
-                        self.f1=list(self.f1[att]+rms_gamma*gf1[att]/(np.sqrt(vtildef1[att])+rms_epsilon) for att in self.attrange)
+                        for att in self.attrange:
+                            self.f1[att][:,0:-1]=self.f1[att][:,0:-1]+rms_gamma*gf1[att]/(np.sqrt(vtildef1[att])+rms_epsilon) 
                         self.f2=self.f2+rms_gamma*gf2/(np.sqrt(vtildef2)+rms_epsilon)
+                        
+                    if with_trace:
+                        if self.numatts>0:
+                            trace['f1update_norm'].append(np.linalg.norm(rms_gamma*gf1[0]/(np.sqrt(vtildef1[0])+rms_epsilon)))
+                        # only the first attribute is recorded in the trace!
+                        trace['f2update_norm'].append(np.linalg.norm(rms_gamma*gf2/(np.sqrt(vtildef2)+rms_epsilon)))
                         
                     if learn_bins:
                         gbb=gbb+rms_lambda*self.binbounds
@@ -1137,15 +1231,21 @@ class AHK_graphon():
                     
                 if method == "greedy":
                     for att in self.attrange:
-                        gf1[att]=gf1[att]/np.linalg.norm(gf1[att])
+                        #gf1[att]=gf1[att]/np.linalg.norm(gf1[att])
                         self.f1[att][:,0:-1]+=gr_lr*gf1[att]
                         
-                    gf2=gf2/np.linalg.norm(gf2)
+                    #gf2=gf2/np.linalg.norm(gf2)
                     self.f2+=gr_lr*gf2
 
+                    if with_trace:
+                        if self.numatts>0:
+                            trace['f1update_norm'].append(np.linalg.norm(gr_lr*gf1[0]))
+                        # only the first attribute is recorded in the trace!
+                        trace['f2update_norm'].append(gr_lr*gf2)
+                        
                     if learn_bins:
-                        gbb=gbb/np.linalg.norm(gbb)
-                        binupdate=gr_lr*gbb
+                        #gbb=gbb/np.linalg.norm(gbb)
+                        self.binbounds=self.binbounds+gr_lr*gbb
 
                 # Smoothing the f1 values and inserting last component:
                 for att in self.attrange:
@@ -1182,6 +1282,8 @@ class AHK_graphon():
             
             #if method == "adam":
             #    ad_alpha=0.9*ad_alpha
+            if method =="greedy":
+                gr_lr/=gr_lr_dec
                 
             if epochs==1:
                 bestmodel=self.copy()
@@ -1193,15 +1295,66 @@ class AHK_graphon():
                     noimprov=0
                 else:
                     noimprov+=1
-            print("Epoch",  epochs,  "log-lik: ", epochll, "early_stop: " ,early_stop, "noimprov: ", noimprov)
+            print("Epoch",  epochs,  "log-lik: ", epochll, "early_stop: " , noimprov,"/",early_stop)
+            #print("Current 1 type dis.: ", self.get_one_type_dist(),'\n')
+            #print("Current binbounds: ", self.binbounds,'\n')
+            
             
             if with_trace:
                 trace['loglik'].append(epochll)
-                trace['f1'].append(self.f1[0].copy())
+                if self.numatts>0:
+                    trace['f1'].append(self.f1[0].copy())
                 trace['f2'].append(self.f2.copy())
                 
             terminate=(epochs==numepochs) or (noimprov==early_stop)
         
         return bestmodel,bestloglik,trace
    
+    def learn(self,settings,data,rng,**kwargs):
         
+        with_trace=settings['with_trace']
+        
+        terminate=False
+        count=0
+
+        bestloglik=-math. inf
+        bestmod=None
+        
+        if with_trace:
+            trace={}
+            trace['loglik']=[]
+            trace['f1']=[]
+            trace['f2']=[]
+            trace['f1grad_norm']=[]
+            trace['f2grad_norm']=[]
+            trace['f1update_norm']=[]
+            trace['f2update_norm']=[]
+            
+        while not terminate:
+            mod,loglik,tr=self.learn_fixed_bins(settings,data,rng,**kwargs)
+            if with_trace:
+                trace['loglik']=trace['loglik']+tr['loglik']
+                trace['f1']=trace['f1']+tr['f1']
+                trace['f2']=trace['f2']+tr['f2']
+                trace['f1grad_norm']=trace['f1grad_norm']+tr['f1grad_norm']
+                trace['f2grad_norm']=trace['f2grad_norm']+tr['f2grad_norm']
+                trace['f1update_norm']=trace['f1update_norm']+tr['f1update_norm']
+                trace['f2update_norm']=trace['f2update_norm']+tr['f2update_norm']
+
+            if loglik>bestloglik:
+                bestmod=mod
+                bestloglik=loglik
+                
+                self.set_f1(mod.f1)
+                self.set_f2(mod.f2)
+
+                if settings['learn_bins']:
+                    self.binbounds=mod.binbounds
+                self.splitbins()
+
+            else:
+                terminate=True
+           
+            
+
+        return bestmod, bestloglik,trace    

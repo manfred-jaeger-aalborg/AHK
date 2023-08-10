@@ -2,7 +2,8 @@ import numpy as np
 import networkx as nx
 import math
 
-from AHK.utils import World,Signature,enumerate_unary_worlds,splitprobs,split3
+
+utils import World,Signature,enumerate_unary_worlds,splitprobs,split3
 
 
 import itertools

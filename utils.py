@@ -154,6 +154,7 @@ def nx_to_world(nxg,  featmaps=None):
         numatts=len(featmaps.keys())
         unaries=np.zeros(numatts,dtype=int)
         for i,k in enumerate(featmaps.keys()):
+            print(i,k)
             unaries[i]=len(featmaps[k].keys())
     
     sig=Signature(unaries,1,nx.is_directed(nxg))

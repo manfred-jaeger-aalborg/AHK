@@ -247,3 +247,48 @@ def data_typeCounts_unary(data):
         tcounts=d.typeCounts_unary(tcounts)     
     tcounts=normalize_typeCounts(tcounts)
     return tcounts
+
+def splitprobs(p):
+    """
+    Splits a probability distribution p=p0,...,p(n-1) randomly into two distributions
+    q0=q00,...,q0(n-1), q1=q10,...,q1(n-1), such that 0.5*q0+0.5*q1=p
+    """
+    # randomly generate a direction:
+    d=np.random.random(len(p))-0.5
+    print("d 1: ", d)
+    d=d*(np.minimum(p,1-p)) #smaller changes for coordinates near 1 or 0
+    print("d 2: ", d)
+    d=d/np.sum(d)
+    
+    # determine distance from p to the boundary of the probability parameter space
+    # in directions d and -d: (-600-)
+
+    
+    l=np.min((1-p)/np.abs(d))
+    l=np.min((l,np.min(p/np.abs(d))))
+
+    print("d: ", d, "l: ",l)
+    
+    #random steplength:
+    sl=np.random.random()*l
+
+    return p+sl*d,p-sl*d
+
+
+def split3(p):
+    """
+    Splits probability value p into q1,q2,q3, such that p=0.5*q1+0.25*q2+0.25*q2
+    """
+    minq1=np.max((0,p-0.25))
+    maxq1=np.min((1,2*p))
+    q1=minq1+(maxq1-minq1)*np.random.random()
+    
+    sumq2q3=4*(p-0.5*q1)
+    minq2=np.max((0,sumq2q3-1))
+    maxq2=np.min((1,sumq2q3))
+
+    q2=minq2+(maxq2-minq2)*np.random.random()
+    
+    q3=4*(p-0.5*q1-0.25*q2)
+    return np.array((q1,q2,q3))
+    

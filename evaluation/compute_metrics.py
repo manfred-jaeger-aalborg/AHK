@@ -27,6 +27,47 @@ def get_degs(graphs):
         val.append(nx.degree_histogram(g))
     return val
 
+def get_clos(graphs):
+    val = []
+    for g in graphs:
+    	a,_ = np.histogram(list(nx.closeness_centrality(g).values()))
+    	val.append(list(a))
+    return val
+    
+def get_asp(graphs):
+    val = []
+    for g in graphs:
+    	Gcc = sorted(nx.connected_components(g), key=len, reverse=True)
+    	G0 = g.subgraph(Gcc[0])
+    	a = nx.average_shortest_path_length(G0)
+    	val.append(a)
+    	
+    a,_ = np.histogram(val)
+    return [a]
+   
+    
+def get_eccen(graphs):
+    val = []
+    for g in graphs:
+    	Gcc = sorted(nx.connected_components(g), key=len, reverse=True)
+    	G0 = g.subgraph(Gcc[0])
+    	a,_ = np.histogram(list(nx.eccentricity(G0).values()))
+    	val.append(list(a))
+    return val
+
+def get_neigh_deg(graphs):
+    val = []
+    for g in graphs:
+    	a,_ = np.histogram(list(nx.assortativity.average_neighbor_degree(g).values()))
+    	val.append(list(a))
+    return val
+    
+def get_betw(graphs):
+    val = []
+    for g in graphs:
+    	a,_ = np.histogram(list(nx.betweenness_centrality(g).values()))
+    	val.append(list(a))
+    return val
 
 
 def edge_list_reindexed(G):

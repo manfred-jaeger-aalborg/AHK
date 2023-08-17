@@ -61,16 +61,15 @@ def ahk_sbm(coldis,edgeprobs,directed):
     return ahk
     
 
-def sample_data(model,n,minnodes,maxnodes,**kwargs):
+def sample_data(model,n,minnodes,maxnodes,rng,**kwargs):
     data=[]
     for i in range(n):
         nn=np.random.randint(minnodes,high=maxnodes)
-        data.append(model.sample_world(nn,**kwargs))
+        data.append(model.sample_world(nn,rng,**kwargs))
     return data
 
 
 # Generating 'spatial' random graphs:
-
 def random_spatial_graph(n,q,directed):
     if directed:
         G=nx.DiGraph()

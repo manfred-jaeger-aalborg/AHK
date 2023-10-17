@@ -1,7 +1,9 @@
 import numpy as np
 import networkx as nx
 import math
-
+import utils
+import datetime
+import pickle as pkl
 
 from utils import World,Signature,enumerate_unary_worlds,splitprobs,split3
 
@@ -204,6 +206,10 @@ class AHK_graphon():
     """
     def precompute_pair_factors(self,w):
         result=np.zeros((self.granularity,self.granularity,w.n,w.n))
+        #setting the "diagonals" to 1:
+        for g in range(self.granularity):
+            for i in range(w.n):
+                result[g,g,i,i]=1.0
         if self.directed:
             for (n1,n2) in permutations(range(w.n),r=2): #iterating over all pairs of nodes n1 != n2
                 for b1 in range(self.granularity): 
@@ -397,12 +403,11 @@ class AHK_graphon():
         result = {}
         
         for i,b in enumerate(self.btuples(n)):
-            result[i]=bb
+            result[i]=b
             
         return result
  
     def get_piweights(self,UP,BP):
-        # construct a weight vector for use in random_pi
         
         # First compute matrix with elements BP[k,h,i,j]*UP[k,i]*UP[h,j]:
         piweights=np.moveaxis(BP,2,1)*UP
@@ -413,184 +418,298 @@ class AHK_graphon():
 
         return piweights
 
+    def precompute_single_pair_factors(self,UP,BP):
+        # Combine UP,BP obtain from precompute_single[pair]_factors into one
+        # matrix:
+        #  if i != j:    UBP[k,h,i,j]=BP[k,h,i,j]*UP[k,i]*UP[h,j]
+        #                UBP[k,k,i,i]=UP[k,i] (BP[k,k,i,i]=1.0) 
+        ubp=np.moveaxis(BP,2,1)*UP
+        ubp=np.moveaxis(ubp,(2,3),(0,1))*UP
+        # This has now shape [g,w.n,g,w.n] with arguments [h,j,k,i]
+        # re-ordering:
+        ubp=np.moveaxis(ubp,(0,1),(1,3))
+        # Now: UBP[k,k,i,i]=UP[k,i]**2
+        # correct that:
+        for k in range(ubp.shape[0]):
+            for i in range(ubp.shape[2]):
+                ubp[k,k,i,i]/=UP[k,i]
+        return ubp
+    
     def get_bweights(self,BP):
          #bweights = np.sum(BP,axis=1)
         bweights = np.max(BP,axis=1)
         return bweights
 
-    def random_pi_and_b(self,UP,BP,rng):
+    def random_pi_and_b(self,settings,UP,BP,rng,idx_to_b=None,**kwargs):
+        """
+        Note: currently the 'sampler' choice a bit superfluous, as 'nonseq' is
+        the only really feasible choice.
+        """
+        if 'sampler' in kwargs.keys():
+            s=kwargs['sampler']
+            if s=='nonseq':
+                return self.random_pi_and_b_nonseq(UP,BP,rng,**kwargs)
+            if s=='uniform':
+                assert idx_to_b is not None, "cannot use uniform sampling without an indexer for b vectors"
+                return self.random_pi_and_b_uniform(rng,UP.shape[1],idx_to_b,**kwargs)
+        else:
+            return self.random_pi_and_b_nonseq(UP,BP,rng)
+
+    def random_pi_and_b_uniform(self,rng,numnodes,idx_to_b,**kwargs):
+        pi=rng.permutation(numnodes)
+        numbs=len(idx_to_b)
+        bidx=rng.integers(numbs)
+        return pi,idx_to_b[bidx],math.factorial(numnodes)/numbs
+        
+    def random_pi_and_b_two_stage(self,UP,BP,piweights,bweights,rng,**kwargs):
+        l=UP.shape[1]
+        piprob,pi=self.random_pi(l,piweights,rng)
+        bprob,b=self.random_b_for_pi(pi,BP,UP,bweights,rng)
+        return pi,b,piprob*bprob
+    
+  
+    # def random_pi_and_b_pre_post(self,UBP,rng,**kwargs):
+    #     """
+    #     Incrementally build up pi and b.
+    #     At each point in time, have a partially constructed
+    #     permutation (example: n=7)
+    #        rpi=[3,1,5,.,.,.,.]
+    #     and bin assignment
+    #        rb=[0,0,1,.,.,.,.]
+    #     The nodes still to be inserted are contained in the
+    #     sorted list
+    #        remaining=(0,2,4,6)
+    #     """
+    #     if "verbose" in kwargs.keys():
+    #         verbose=kwargs['verbose']
+    #     else:
+    #         verbose = False
+            
+    #     l=UBP.shape[2] # number of nodes
+    #     rpi=np.zeros(l,dtype=np.int32)
+    #     rb=np.zeros(l,dtype=np.int32)
+    #     pibprob=1
+
+    #     remaining=list(i for i in range(l))
+    #     minbin=0
+
+    #     """
+    #     The following matrices postweights,preweights are matrices whose
+    #     rows and columns represent candidate bins and nodes, respectively, for the
+    #     next insertion into the partially constructed b and pi arrays.
+
+    #     Dimensions of all matrices are (self.granularity-minbin) X (l-p), where p is the
+    #     index of the next insertion into b,pi.
+
+    #     Row i corresponds to bin minbin+i3
+    #     Column j corresponds to node remaining[j]
+    #     """
+        
+    #     # bias towards lower bins:
+    #     bias = np.array(list( 2.0**(-b) for b in range(self.granularity)))
+       
+    #     # preweights: weights that measure the compatibility of (b,r) insertion with
+    #     # previous insertions
+    #     # preweights[b,r]=min_{(b',r') already inserted} UBP[b',b,r',r]
+    #     preweights=np.ones((self.granularity,l))
+        
+    #     # postweights: weights that measure the compatibility of (b,r) insertion with
+    #     # subsequent insertions
+    #     # postweights[b,r]=min_{r' \in remaining; r' != r} max_{b' \geq b} UBP[b,b',r,r']
+        
+    #     postweights=np.max(UBP,axis=1) # has shape (granularity x l x l) corresponding to (b,r,r')
+    #     # postargs: auxiliary array that holds the index at which the following min is attained
+    #     # (for faster updates):
+    #     postargs = np.argmin(postweights,axis=2)
+    #     postweights=np.min(postweights,axis=2)
+
+       
+    #     for p in range(l):
+
+    #         # combine the pre/post factors:
+    #         weights=np.minimum(preweights,postweights)
+    #         # bias towards lower bins:
+    #         weights=weights*bias[0:self.granularity-minbin,np.newaxis]
+            
+    #         # sample next (bin,node) pair for insertion in rb and rpi:
+    #         sampleprobs=weights.ravel()
+    #         sum = np.sum(sampleprobs)
+    #         assert sum != 0, "zero sum in sampleprobs \n upweights: \n {}\
+    #         \n preweights: \n {}\n postweights: \n {}\n b: {} \n pi: {}".format(upweights,preweights,postweights,rb,rpi)
+    #         sampleprobs=sampleprobs/sum
+    #         if verbose:
+    #             print("**** start iteration",p)
+    #             print("remaining: \n", remaining)
+    #             print("preweights: \n", preweights)
+    #             print("postweights: \n", postweights)
+    #             print("postargs: \n", postargs)
+    #             print("Sampleprobs: \n",sampleprobs.reshape(weights.shape))
+            
+    #         rbidx=rng.choice(range(len(sampleprobs)),p=sampleprobs)
+    #         pibprob*=sampleprobs[rbidx]
+    #         rbidx=np.unravel_index(rbidx, weights.shape)
+            
+    #         # insert:
+    #         rpi[p]=remaining[rbidx[1]]
+    #         rb[p]=minbin+rbidx[0]
+
+    #         if verbose:
+    #             print("rpi= ", rpi)
+    #             print("b= ", rb ,"\n")
+            
+    #         # update minbin:
+    #         minbin=rb[p]
+
+    #         # update remaining:
+    #         del remaining[rbidx[1]]
+
+    #         # update preweights:
+    #         preweights=preweights[rbidx[0]:,:]
+    #         preweights=np.delete(preweights,rbidx[1],1)
+    #         for bb in range(preweights.shape[0]):
+    #             for rr in range(preweights.shape[1]):
+    #                 preweights[bb,rr]=np.minimum(preweights[bb,rr],UBP[rb[p],minbin+bb,rpi[p],remaining[rr]])
+
+    #         # update postweights:
+    #         postweights=postweights[rbidx[0]:,:]
+    #         postweights=np.delete(postweights,rbidx[1],1)
+    #         postargs=postargs[rbidx[0]:,:]
+    #         postargs=np.delete(postargs,rbidx[1],1)
+
+    #         for bb,rr in zip(*np.where(postargs==rpi[p])):
+
+    #             maxbins=np.max(UBP[minbin+bb,minbin:,remaining[rr],remaining].transpose(),axis=0) # it looks like without transpose the
+    #                                                                                               # 'remaining' axis becomes axis 0
+    #             if verbose:                                                                          
+    #                 print("@1 b: ", bb, " r: ",rr)
+    #                 print("@1 postargs: \n", postargs)
+    #                 print("@1 postweights: \n", postweights)                                          
+    #                 print("@1 maxbins: \n",maxbins)
+                    
+    #             argmin=np.argmin(maxbins)
+    #             postweights[bb,rr]=np.min(maxbins)
+    #             assert argmin<len(remaining),"bb: {}  rr: {} remaining: {} mingin: {} argmin: {} \n maxbins: {} \n \
+    #             BP: {}".format(bb,rr,remaining,minbin,argmin,maxbins,UBP[bb,minbin:,rr,remaining])
+                
+    #             postargs[bb,rr]=remaining[argmin]
+
+    #             if verbose:
+    #                 print("@2 postargs: \n", postargs)
+    #                 print("@2 postweights: \n", postweights, "\n")
+                    
+            
+    #     return rpi,rb,pibprob
+
+    def random_pi_and_b_nonseq(self,UP,BP,rng,**kwargs):
         """
         Incrementally build up pi and b.
         At each point in time, have a partially constructed
         permutation (example: n=7)
-           rpi=[3,1,5,.,.,.,.]
+           rpi=[3,1,5]
         and bin assignment
-           rb=[0,0,1,.,.,.,.]
+           rb=[0,0,1]
         The nodes still to be inserted are contained in the
         sorted list
            remaining=(0,2,4,6)
         """
-        l=UP.shape[1]
-        rpi=np.zeros(l,dtype=np.int32)
-        rb=np.zeros(l,dtype=np.int32)
+        if "verbose" in kwargs.keys():
+            verbose=kwargs['verbose']
+        else:
+            verbose = False
+            
+        l=UP.shape[1] # number of nodes
+        rpi=[]
+        rb=[]
         pibprob=1
 
-        remaining=list(i for i in range(l))
+        remaining=list(rng.permutation(l))
         minbin=0
 
-        # Copies of UP,BP that are modified during the sampling procedure:
-        UPlocal=UP.copy()
-        BPlocal=BP.copy()
-        # weights for random sampling of next element and bin assignment:
-        # initialized as UP:
-        weights=UPlocal.copy()
-        # factor in the probabilities of subsequent element insertions:
-        postweights=np.max(BP,axis=1) # has shape granularity x l x l
-        # set the "diagonal" to 1, so that it does not affect the subsequent minimum:
-        for r in range(l):
-            for b in range(self.granularity):
-                postweights[b,r,r]=1.0
-        postweights=np.min(postweights,axis=2)
-        weights=np.minimum(weights,postweights)
-        #print("weights: ", weights)
-
-        # bias towards lower bins:
-        bias = np.array(list( 1/(1+b)    for b in range(self.granularity)))
-        #print("bias: ",bias)
-        weights=weights*bias[:,np.newaxis]
-        #print("weights: ", weights)
-
-       
+        ## The following for now is optimized for algorithmic clarity, not
+        ## for efficiency ...
         for p in range(l):
+            i = remaining.pop()
+            if verbose:
+                print("pi: ",rpi," b: ",rb, " next: ", i, " remaining: ",remaining, "\n")
+            # Construct list of possible combinations [pos,b] of insertion positions pos and bin assignment b
+            insertions = []
+            if p==0:
+                for b in range(self.granularity):
+                    insertions.append(np.array([0,b]))
+            else:
+                for pos in range(len(rpi)+1):
+                    # before current first element
+                    if pos==0:
+                        min = 0
+                    else:
+                        min = rb[pos-1]
+                    # after current last element
+                    if pos==len(rpi):
+                        max=self.granularity-1
+                    else:
+                        max = rb[pos]
+                    # if verbose:
+                    #     print("append to insertions: pos: ",pos," min: ",min, " max: ", max)
+                    for b in range(min,max+1):
+                        insertions.append(np.array([pos,b]))
+            if verbose:
+                print("Insertions: ",insertions)
+            # Eventual sampling weights for inserting i in position pos with bin assignement b) 
+            weights=np.zeros(len(insertions)) 
+            for j,posb in enumerate(insertions):
+                pos=posb[0]
+                b=posb[1]
+                preweight=1.0
+                postweight=1.0
+                remainweight=1.0
+                if pos > 0:
+                    #preweight=np.min(list(UBP[rb[pre],b,rpi[pre],i] for pre in range(pos)))
+                    preweight=np.prod(list(BP[rb[pre],b,rpi[pre],i] for pre in range(pos)))
+                if pos<len(rpi):
+                    #postweight=np.min(list(UBP[b,rb[post],i,rpi[post]] for post in range(pos,len(rpi))))
+                    postweight=np.prod(list(BP[b,rb[post],i,rpi[post]] for post in range(pos,len(rpi))))
+                if len(remaining)>0:
+                    # for r in remaining:
+                    #     maxr=0.0
+                    #     for bb in range(b+1):
+                    #         maxr=np.maximum(maxr,BP[bb,b,r,i]*UP[bb,r])
+                    #     for bb in range(b,self.granularity):
+                    #         maxr=np.maximum(maxr,BP[b,bb,i,r]*UP[bb,r])
+                    #     #remainweight=np.minimum(remainweight,maxr)
+                    #     remainweight*=maxr
+                    maxrleft=np.max( BP[:b+1,b,remaining,i]*UP[:b+1,remaining],axis=0 )
+                    maxrright=np.max( BP[b,b:,i,remaining].transpose()*UP[b:,remaining],axis=0 )
+                    remainweight=np.prod(np.maximum(maxrleft,maxrright))
+
+                #weights[j]=np.min((preweight,postweight,remainweight))
+
+                weights[j]=np.prod((preweight,postweight,remainweight))
+                if verbose:
+                    print("pre: ",preweight, "post: ", postweight, "remain: ",remainweight, "weights[j] before UP:" , weights[j])
+                    print("UP: ", UP[b,i])
+                weights[j]*=UP[b,i]
+                if verbose:
+                    print("weights[j] after UP: \n",weights[j])
+            # normalize:
+            ws = np.sum(weights)
+            assert ws > 0, "sum of weights is 0!"
+            sampleprobs=(weights/ws).ravel()
+            #print("sampleprobs: ",sampleprobs)
             
-            sampleprobs=weights.ravel()
-            sampleprobs=sampleprobs/np.sum(sampleprobs)
-            #print("sampleprobs: ", sampleprobs)
             rbidx=rng.choice(range(len(sampleprobs)),p=sampleprobs)
-            rbidx=np.unravel_index(rbidx, weights.shape)
+            pibprob*=sampleprobs[rbidx]
+            insert_place=insertions[rbidx][0]
+            insert_bin=insertions[rbidx][1]
+            rpi.insert(insert_place,i)
+            rb.insert(insert_place,insert_bin)
+           
+                                          
+        return np.array(rpi), np.array(rb),pibprob
 
-            rpi[p]=remaining[rbidx[1]]
-            rb[p]=minbin+rbidx[0]
-
-            #print("rpi: ",rpi, " rb: ",rb, "\n")
-            
-            minbin=rb[p]
-            del remaining[rbidx[1]]
-
-            # update UPlocal,BPlocal by deleting "used" rows/columns:
-            UPlocal=UPlocal[rbidx[0]:,:]
-            UPlocal=np.delete(UPlocal,rbidx[1],1)
-            BPlocal=BPlocal[rbidx[0]:,rbidx[0]:,:,:]
-            BPlocal=np.delete(BPlocal,rbidx[1],2)
-            BPlocal=np.delete(BPlocal,rbidx[1],3)
-
-            #print("UPlocal: ",UPlocal)
-            #print("shape: ",UPlocal.shape, "\n")
-            #print("BPlocal: ",BPlocal)
-            #print("shape: ",BPlocal.shape, "\n")
-            
-            # Create new weights:
-            if p<l-1:
-                weights=UPlocal.copy()
-                postweights=np.max(BPlocal,axis=1) # has shape (granularity-minbin) x (l-p-1) x (l-p-1)
-                for r in range(weights.shape[1]):
-                    for b in range(weights.shape[0]):
-                        postweights[b,r,r]=1.0
-                postweights=np.min(postweights,axis=2)
-                #print("postweights: ",postweights,"\n")
-                weights=np.minimum(weights,postweights)
-
-                # Take into account the already inserted elements (inefficient?):
-                preweights=np.ones(weights.shape)
-                for q in range(p+1):
-                    for bb in range(weights.shape[0]):
-                        for rr in range(weights.shape[1]):
-                            preweights[bb,rr]=np.minimum(preweights[bb,rr],BP[rb[q],minbin+bb,rpi[q],remaining[rr]])
-                #print("preweights: ",preweights,"\n")
-            
-                weights=np.minimum(weights,preweights)
-
-                
-                # bias towards lower bins:
-                bias = np.array(list( 1/(1+b)    for b in range(weights.shape[0])))
-
-                
-                #print("bias: ",bias)
-                weights=weights*bias[:,np.newaxis]
-            
-            #print("weights: ", weights, "\n")
-            
-        return rpi,rb,pibprob
-
-        # def random_pi_and_b(self,UP,BP,rng):
-        # """
-        # Incrementally build up pi and b.
-        # At each point in time, have a partially constructed
-        # permutation (example: n=7)
-        #    rpi=[3,1,5,.,.,.,.]
-        # and bin assignment
-        #    rb=[0,0,1,.,.,.,.]
-        # The nodes still to be inserted are contained in the
-        # sorted list
-        #    remaining=(0,2,4,6)
-        # For selecting the next node to be added to rpi,
-        # use weight vector piprobs of length len(remaining)
-        # """
-        # l=UP.shape[1]
-        # rpi=np.zeros(l,dtype=np.int32)
-        # rb=np.zeros(l,dtype=np.int32)
-        # pibprob=1
-
-        # piweights=self.get_piweights(UP,BP)
-        # bweights=self.get_bweights(BP)
-
-        # remaining=list(i for i in range(l))
-
-  
-        
-
-        # for p in range(l):
-        #     #next element in permutation:
-        #     #print("p ", p, " l ",l)
-        #     if p<l-1:
-        #         piprobs=np.sum(piweights,axis=1)
-        #         piprobs=piprobs/np.sum(piprobs)
-        #     else:
-        #         piprobs=np.array([1.0]) #
-        #     print("piweights: ",piweights)
-        #     print("piprobs: ",piprobs)
-        #     nidx=rng.choice(range(len(remaining)),p=piprobs) #sample index in the list remaining
-        #     pibprob*=piprobs[nidx]
-        #     rpi[p]=remaining[nidx]
-        #     del remaining[nidx]
-        #     piweights=np.delete(piweights,nidx,0)
-        #     piweights=np.delete(piweights,nidx,1)
-        #     print("rpi: ", rpi)
-        #     print("remaining: ",remaining)
-
-        #     #bin for inserted element:
-        #     nbweights=UP[:,rpi[0]].copy()
-        #     if p>0:
-        #         nbweights[0:rb[p-1]]=0
-        #     for b in range(rb[p-1],self.granularity):
-        #         # comparison with the already inserted elements:
-        #         for q in range(p):
-        #             nbweights[b]=min(nbweights[b],BP[rb[q],b,rpi[q],rpi[p]])
-        #         # comparison with remaining elements:
-        #         for r in remaining:
-        #             best_b_for_r=0.0
-        #             for bb in range(b,self.granularity):
-        #                 best_b_for_r=max(best_b_for_r,BP[b,bb,rpi[p],r])
-        #             nbweights[b]=min(nbweights[b],best_b_for_r)
-        #     nbweights/=np.sum(nbweights)
-
-        #     print("nbweights: ",nbweights)
-        #     rb[p]=rng.choice(range(self.granularity),p=nbweights)
-        #     pibprob*=nbweights[rb[p]]
-        #     print("rb: ",rb)
-        # return rpi,rb,pibprob
     
-    def importance_sample(self,w,rng,return_pibs=False,trace=False,**kwargs):
+ 
+  
+    def importance_sample(self,settings,w,rng,return_pibs=False,with_trace=False,**kwargs):
         """
         w: an incompletely observed world
         rng: a random generator
@@ -637,12 +756,14 @@ class AHK_graphon():
             
         UP=self.precompute_single_factors(w)
         BP=self.precompute_pair_factors(w)
-                
-        piweights=self.get_piweights(UP,BP)
-        bweights=self.get_bweights(BP)
-            
+           
         P_of_pi_b=self.get_bprobs(w.n)
-        bidx=self.b_to_index(w.n)
+
+        b_to_idx=self.b_to_index(w.n)
+        if return_pibs or kwargs['sampler']=='uniform':
+            idx_to_b=self.index_to_b(w.n)
+        else:
+            idx_to_b=None
             
         terminate=False
         sampled = 0
@@ -654,36 +775,36 @@ class AHK_graphon():
         
         nochangecount=0
         lastvalue=1
-        if trace:
-            trace=[]
+        if with_trace:
+            trace={}
+            trace['estimate']=[]
+            trace['Qweight']=[]
         else:
             trace=None
 
+        #print("importance sampling with ", numsamples, " samples and trace=", with_trace)    
         num_pibs=None
         if return_pibs:
              numus=math.comb(self.granularity+w.n-1,w.n)
-             b_to_index=self.b_to_index(w.n)
              numpis=math.factorial(w.n)
-             pi_to_index=self.pi_to_index(w.n)
+             pi_to_idx=self.pi_to_index(w.n)
              num_pibs=np.zeros((numpis,numus))
         
         while not terminate:
             sampled+=1
             
-            piprob,pi=self.random_pi(w.n,piweights,rng)
-            #print("pi: ", pi)
-             
-            bprob,b=self.random_b_for_pi(pi,BP,UP,bweights,rng)
-            #print("b: ", b)
 
-            pi,b,pibprob=self.random_pi_and_b(UP,BP,rng)
+            pi,b,pibprob=self.random_pi_and_b(settings,UP,BP,rng,idx_to_b=idx_to_b,**kwargs)
+
+            if with_trace:
+                trace['Qweight'].append(pibprob)
             
             if return_pibs:
-                num_pibs[pi_to_index[tuple(pi)],b_to_index[tuple(b)]]+=1
+                num_pibs[pi_to_idx[tuple(pi)],b_to_idx[tuple(b)]]+=1
       
             p_pi_b=self.calculate_pi_b_precomp(pi,b,UP,BP)
             #worldweight=p_pi_b*P_of_pi_b[bidx[tuple(b)]]/(piprob*bprob)
-            worldweight=p_pi_b*P_of_pi_b[bidx[tuple(b)]]/pibprob
+            worldweight=p_pi_b*P_of_pi_b[b_to_idx[tuple(b)]]/pibprob
             
             pw+=worldweight
             
@@ -697,7 +818,9 @@ class AHK_graphon():
                                     qfac=1
                                 else:
                                     qfac=0
-                            else:    
+                            else:
+                                # print("debug: ", b , "type: ", type(b))
+                                # print("debug: ", np.where(pi==at[1]) )
                                 bofarg=b[np.where(pi==at[1])]
                                 qfac=self.f1[at[0]][bofarg,at[2]]
 
@@ -733,11 +856,11 @@ class AHK_graphon():
 
                     tq[q]+=qprob*worldweight
                     fq[q]+=(1-qprob)*worldweight
-                if trace:
-                    trace.append(tq/(tq+fq))
+                if with_trace:
+                    trace['estimate'].append(tq/(tq+fq))
             else:
-                if trace:
-                    trace.append(pw/sampled)
+                if with_trace:
+                    trace['estimate'].append(pw/sampled)
             # now determine termination:
             if not numsamples==None:
                 terminate=(sampled==numsamples)
@@ -830,6 +953,10 @@ class AHK_graphon():
 
         #print("b for pi: ", pi)
         for p in range(len(rb)):
+            #
+
+            #
+            #print("b: ", rb)
             bprobs=UP[:,pi[p]].copy()
             #print("bprobs #1:", bprobs)
             for q in range(p):
@@ -838,6 +965,7 @@ class AHK_graphon():
             for q in range(p+1,len(rb)):
                 bprobs*=bweights[:,pi[p],pi[q]]
                 #print("bprobs #3:", bprobs)
+            bprobs[0:rb[p-1]]=0
             probsum=np.sum(bprobs)
             if probsum >0:
                 bprobs=bprobs/np.sum(bprobs)
@@ -852,40 +980,40 @@ class AHK_graphon():
             
         return bp,rb
         
-    def sample_pi_and_b(self,w,numsamps):
-        """
-        Sample (pi,b) pairs, and return in a matrix with counts for the different (pi,u) 
-        combinations. For debugging and illustrative purposes (this is basically running importance 
-        sampling, without the probability computations)
-        """
-        UP=self.precompute_single_factors(w)
-        BP=self.precompute_pair_factors(w)
+    # def sample_pi_and_b(self,w,numsamps):
+    #     """
+    #     Sample (pi,b) pairs, and return in a matrix with counts for the different (pi,u) 
+    #     combinations. For debugging and illustrative purposes (this is basically running importance 
+    #     sampling, without the probability computations)
+    #     """
+    #     UP=self.precompute_single_factors(w)
+    #     BP=self.precompute_pair_factors(w)
         
  
-        piweights=np.moveaxis(BP,2,1)*UP
-        piweights=np.moveaxis(piweights,(2,3),(0,1))*UP
-        # This has now shape [g,w.n,g,w.n] with arguments [h,j,k,i]
-        # marginalizaing out the bin arguments and swapping again the order of j,i:
-        piweights=np.transpose(np.sum(piweights,axis=(0,2)))
+    #     piweights=np.moveaxis(BP,2,1)*UP
+    #     piweights=np.moveaxis(piweights,(2,3),(0,1))*UP
+    #     # This has now shape [g,w.n,g,w.n] with arguments [h,j,k,i]
+    #     # marginalizaing out the bin arguments and swapping again the order of j,i:
+    #     piweights=np.transpose(np.sum(piweights,axis=(0,2)))
         
-        bweights = np.sum(BP,axis=1)
+    #     bweights = np.sum(BP,axis=1)
         
   
-        numus=math.comb(self.granularity+w.n-1,w.n)
-        b_to_index=self.b_to_index(w.n)
+    #     numus=math.comb(self.granularity+w.n-1,w.n)
+    #     b_to_index=self.b_to_index(w.n)
        
 
-        numpis=math.factorial(w.n)
-        pi_to_index=self.pi_to_index(w.n)
+    #     numpis=math.factorial(w.n)
+    #     pi_to_index=self.pi_to_index(w.n)
 
             
-        importance_sample=np.zeros((numpis,numus))
+    #     importance_sample=np.zeros((numpis,numus))
 
-        for i in range(numsamps):          
-            piprob,pi=self.random_pi(w.n,piweights)
-            bprob,b=self.random_b_for_pi(pi,BP,UP,bweights)
-            importance_sample[pi_to_index[tuple(pi)],b_to_index[tuple(b)]]+=1
-        return importance_sample
+    #     for i in range(numsamps):          
+    #         piprob,pi=self.random_pi(w.n,piweights)
+    #         bprob,b=self.random_b_for_pi(pi,BP,UP,bweights)
+    #         importance_sample[pi_to_index[tuple(pi)],b_to_index[tuple(b)]]+=1
+    #     return importance_sample
         
     def compute_loglik(self,data):
         loglik=0
@@ -899,7 +1027,7 @@ class AHK_graphon():
             loglik+=np.log(self.importance_sample(w,rng,**kwargs)[0])
         return loglik
     
-    def estimate_grad(self,w,rng,learn_bins=False,num_pi_b=1):
+    def estimate_grad(self,settings,w,rng,learn_bins=False,num_pi_b=1):
         """
         Approximate computation of the gradient of the log-likelihood given by 
         world w. Approximation based on random sample of pi,b combinations using the
@@ -912,17 +1040,13 @@ class AHK_graphon():
         UP=self.precompute_single_factors(w)
         BP=self.precompute_pair_factors(w)
         
-        piweights=self.get_piweights(UP,BP)
-        bweights = self.get_bweights(BP)
-        
         nfac=math.factorial(w.n)
         
         # Generate random pi,b pairs:
         pi_b=[]
         for i in range(num_pi_b):
-            ppi,pi=self.random_pi(w.n,piweights,rng)
-            pb,b=self.random_b_for_pi(pi,BP,UP,bweights,rng)
-            pi_b.append([pi,b,ppi*pb])
+            pi,b,pibprob=self.random_pi_and_b(settings,UP,BP,rng)
+            pi_b.append([pi,b,pibprob])
             
         #Initialize: 
         g1=list(np.zeros((self.granularity,self.signature.unaries[i]-1)) for i in self.attrange)
@@ -942,11 +1066,12 @@ class AHK_graphon():
         # Iterate over pi,b pairs:    
         for i in range(num_pi_b):
             
-            g1n,g2n,pn=self.compute_grad_for_pi_b(w,pi_b[i][0],pi_b[i][1])
+            g1n,g2n,pn=self.compute_grad_for_pi_b(settings,w,pi_b[i][0],pi_b[i][1])
             #print("pi: ",pi_b[i][0],"b: ",pi_b[i][1], " prob pi,b: ", pi_b[i][2], "prob w,pi,b: ", pn)
             if pn==0:
                 print("zero prob. for pi", pi_b[0][0], " and b: ", pi_b[0][1])
-                print("f1: ", self.f1[0])
+                if self.numatts > 0:
+                    print("f1: ", self.f1[0])
                 print("f2: ", self.f2)
           
             v,gvn=self.volume(pi_b[i][1],learn_bins)
@@ -980,12 +1105,13 @@ class AHK_graphon():
         #return g1,g2,gv,np.log(p),trace 
         return g1,g2,gv,np.log(p)
         
-    def estimate_grad_batch(self,batch,rng,learn_bins=False,num_pi_b=1,**kwargs):
-        gg1,gg2,ggv,p=self.estimate_grad(batch[0],rng,learn_bins,num_pi_b)
+    def estimate_grad_batch(self,settings,batch,rng,learn_bins=False,num_pi_b=1,**kwargs):
+        gg1,gg2,ggv,p=self.estimate_grad(settings,batch[0],rng,learn_bins,num_pi_b)
         #print("batch first p: ", p)
         if "exact_gradients" in kwargs.keys():
             exgrad=kwargs['exact_gradients']
         else:
+
             exgrad=False
         assert not (exgrad and learn_bins),"Combination of exact gradients and bin learning not available!"
         for i in range(1,len(batch)):
@@ -993,7 +1119,7 @@ class AHK_graphon():
                  gg1add,gg2add,_,padd=self.compute_grad(batch[i])
                  ggvadd=None
             else:
-                gg1add,gg2add,ggvadd,padd=self.estimate_grad(batch[i],rng,learn_bins,num_pi_b)
+                gg1add,gg2add,ggvadd,padd=self.estimate_grad(settings,batch[i],rng,learn_bins,num_pi_b)
             gg1=list(gg1[att]+gg1add[att]  for att in self.attrange)
             gg2+=gg2add
             if learn_bins:
@@ -1003,7 +1129,7 @@ class AHK_graphon():
         return gg1,gg2,ggv,p
         
 
-    def compute_grad(self,w):
+    def compute_grad(self,settings,w):
         gradf1=list(np.zeros((self.granularity,self.signature.unaries[i]-1)) for i in self.attrange)
         if self.directed:
             gradf2 = np.zeros((self.granularity,self.granularity,self.signature.nb,2))
@@ -1016,18 +1142,18 @@ class AHK_graphon():
             ppi=0
             for bidx,b in enumerate(self.btuples(w.n)):
                 b=np.array(b)
-                ggf1,ggf2,pp=self.compute_grad_for_pi_b(w,pi,b)
+                ggf1,ggf2,pp=self.compute_grad_for_pi_b(settings,w,pi,b)
                 for i in self.attrange:
                     gradf1[i]+= bvolumes[bidx]*ggf1[i]
                 gradf2+=bvolumes[bidx]*ggf2
                 p+=bvolumes[bidx]*pp
-        return gradf1,gradf2,None,p
+        return gradf1,gradf2,None,np.log(p)
                 
                 
         
 
         
-    def compute_grad_for_pi_b(self,w,pi,b): 
+    def compute_grad_for_pi_b(self,settings,w,pi,b): 
         """
         Computes the gradients of the f1,f2 functions for P(w,pi,b) (fixed pi and b). 
         Here no approximations and no log of probability/likelihood
@@ -1035,6 +1161,12 @@ class AHK_graphon():
         The gradient of f1 is only for the first m-1 independent parameters, i.e., the elements of
         gradf1 have one less column than the elements of f1 and countf1
         """
+
+        if 'ubias' in settings:
+            ubias=settings['ubias']
+        else:
+            ubias = 0
+            
         gradf1= list(np.zeros((self.granularity,self.signature.unaries[i]-1)) for i in self.attrange)
         countf1= list(np.zeros((self.granularity,self.signature.unaries[i])) for i in self.attrange)
         
@@ -1074,9 +1206,13 @@ class AHK_graphon():
                         countf2[b[ij[0]],b[ij[1]],rel,1,1]+=1
                     else:
                         countf2[b[ij[0]],b[ij[1]],rel,1,0]+=1
+
+        # "Discounting" the binary counts:
+        countf2=countf2/(w.n**ubias)
+        
+        prod=1.0
         
         # Computing the product:
-        prod=1
         for i in range(self.granularity):
             for att in self.attrange:
                 for j in range(self.signature.unaries[att]):
@@ -1163,7 +1299,7 @@ class AHK_graphon():
     def splitbins(self):
         # splits the widest bin into two
         bin_to_split=np.argmax(self.get_binlengths())
-        print("to split: ", bin_to_split)
+        print("Splitting bins. Old:  ", self.binbounds)
         self.granularity+=1
         newbounds=np.zeros(self.granularity+1)
         for i in range(bin_to_split+1):
@@ -1248,7 +1384,7 @@ class AHK_graphon():
                         newf2[k,bin_to_split+1,i]=q2[0]
         
         self.f2=newf2
-    
+        print("New:  ", self.binbounds)
         return
         
     def learn_fixed_bins(self,settings,data,rng,**kwargs):
@@ -1268,7 +1404,38 @@ class AHK_graphon():
             info_each_epoch=kwargs['info_each_epoch']
         else:
             info_each_epoch=False
+
+        trace=None
+        if with_trace:
+            trace={}
+            trace['loglik']=[]
+            trace['f1']=[]
+            trace['f1grad']=[]
+            trace['f2']=[]
+            trace['f2grad']=[]
+            trace['f1grad_norm']=[]
+            trace['f2grad_norm']=[]
+            trace['f1update_norm']=[]
+            trace['f2update_norm']=[]
+            if learn_bins:
+                trace['b']=[]
+                trace['bgrad']=[]
+                trace['bgrad_norm']=[]
+                trace['bupdate_norm']=[]
             
+        # For single bin and single undirected relation: just empirical frequencies:
+        if self.granularity==1 and self.numatts==0 and self.signature.nb==1 and not self.signature.directed:
+            assert self.numatts==0 and self.signature.nb==1,"Base case with one bin only implemented for single relation, no attributes"
+            self.f2[0,0,0]=utils.get_densities_world(data)
+            _,_,_,loglik=self.estimate_grad_batch(settings,data,rng,**kwargs)
+            if with_trace:
+                trace['loglik'].append(loglik)
+            print("Single bin log-lik: ", loglik)
+            if info_each_epoch:
+                print("F2: ", self.f2)
+            return self.copy(),loglik,trace
+
+        # now real learning for other cases:    
         assert method=="adam" or method=="greedy" or method=="RMSprop"
 
         if method=="adam":
@@ -1293,16 +1460,7 @@ class AHK_graphon():
         assert method=="adam" or method=="greedy" or method=="RMSprop"
 
         
-        trace=None
-        if with_trace:
-            trace={}
-            trace['loglik']=[]
-            trace['f1']=[]
-            trace['f2']=[]
-            trace['f1grad_norm']=[]
-            trace['f2grad_norm']=[]
-            trace['f1update_norm']=[]
-            trace['f2update_norm']=[]
+        
             
         #self.rand_init()
     
@@ -1347,23 +1505,28 @@ class AHK_graphon():
         epochs=0
         
         batchidx=0
-        low=int(batchidx*batchsize)
-        high=int(np.min(((batchidx+1)*batchsize,len(data))))
-        nextbatch=data[low:high]
-
         noimprov=0
-        
+         
         while not terminate:
             epochll=0
             for b in tqdm(range(numbatches)):          
-
+                if 'randombatches' in settings and  settings['randombatches']:
+                    nextbatch=rng.choice(data,batchsize)
+                else:
+                    nextbatch=data[b*batchsize:int(np.minimum((b+1)*batchsize,len(data)))]
+                 
                 
-                gf1,gf2,gbb,llbatch=self.estimate_grad_batch(nextbatch,rng,learn_bins,num_pi_b,**kwargs)
+                gf1,gf2,gbb,llbatch=self.estimate_grad_batch(settings,nextbatch,rng,learn_bins,num_pi_b,**kwargs)
                 #print("grad f1: ", gf1[0],'\n')
                 #print("grad f2 (b2,b2): ", gf2[1,1,0,0],gf2[1,1,0,1],'\n')
                 if with_trace:
+                    trace['f1grad'].append(gf1.copy())
                     trace['f1grad_norm'].append(np.linalg.norm(gf1))
+                    trace['f2grad'].append(gf2.copy())
                     trace['f2grad_norm'].append(np.linalg.norm(gf2))
+                    if learn_bins:
+                        trace['bgrad'].append(gbb.copy())
+                        trace['bgrad_norm'].append(np.linalg.norm(gbb))
                 epochll+=llbatch
 
                 if method == "adam":
@@ -1385,11 +1548,8 @@ class AHK_graphon():
 
                     self.f2=self.f2+ad_alpha*hatmf2/(np.sqrt(hatvf2)+ad_epsilon)
 
-                    if with_trace:
-                        if self.numatts>0:
-                            trace['f1update_norm'].append(np.linalg.norm(ad_alpha*hatmf1[0]/(np.sqrt(hatvf1[0])+ad_epsilon)))
-                        # only the first attribute is recorded in the trace!
-                        trace['f2update_norm'].append(np.linalg.norm(ad_alpha*hatmf2/(np.sqrt(hatvf2)+ad_epsilon)))
+                    
+                            
                     
                     if learn_bins:
                         mbb=ad_beta1*mbb+(1-ad_beta1)*gbb
@@ -1398,6 +1558,13 @@ class AHK_graphon():
                         hatvbb=vbb/(1-ad_beta2**t)
                         self.binbounds+=ad_alpha*hatmbb/(np.sqrt(hatvbb)+ad_epsilon)
 
+                    if with_trace:
+                        if self.numatts>0: # only the first attribute is recorded in the trace!
+                            trace['f1update_norm'].append(np.linalg.norm(ad_alpha*hatmf1[0]/(np.sqrt(hatvf1[0])+ad_epsilon)))
+                        trace['f2update_norm'].append(np.linalg.norm(ad_alpha*hatmf2/(np.sqrt(hatvf2)+ad_epsilon)))
+                        if learn_bins:
+                            trace['bupdate_norm'].append(np.linalg.norm(ad_alpha*hatmbb/(np.sqrt(hatvbb)+ad_epsilon)))
+                            
                     #print("after adam: ", self.f1[0], '\n')
                     #print("after adam  f2 (b2,b2): ", self.f2[1,1,0,0],self.f2[1,1,0,1],'\n')
                 
@@ -1460,7 +1627,7 @@ class AHK_graphon():
                         if self.numatts>0:
                             trace['f1update_norm'].append(np.linalg.norm(gr_lr*gf1[0]))
                         # only the first attribute is recorded in the trace!
-                        trace['f2update_norm'].append(gr_lr*gf2)
+                        trace['f2update_norm'].append(np.linalg.norm(gr_lr*gf2))
                         
                     if learn_bins:
                         #gbb=gbb/np.linalg.norm(gbb)
@@ -1490,12 +1657,13 @@ class AHK_graphon():
                     # Bring back to [0,1]
                     self.binbounds=(self.binbounds-self.binbounds[0])/(self.binbounds[-1]-self.binbounds[0])
 
-                
-                batchidx=(batchidx+1)%numbatches
-                low=int(batchidx*batchsize)
-                high=int(np.min(((batchidx+1)*batchsize,len(data))))
-                
-                nextbatch=data[low:high]
+  
+                if with_trace:
+                    if self.numatts>0:
+                        trace['f1'].append(list(self.f1[at].copy() for at in self.attrange))
+                    trace['f2'].append(self.f2.copy())
+                    if learn_bins:
+                        trace['b'].append(self.binbounds.copy())
             
             epochs+=1
             
@@ -1519,13 +1687,23 @@ class AHK_graphon():
                 print("F2: ", self.f2)
             #print("Current 1 type dis.: ", self.get_one_type_dist(),'\n')
             #print("Current binbounds: ", self.binbounds,'\n')
-            
+
+            if 'adaptbatchsize' in settings and settings['adaptbatchsize']:
+                if noimprov>0:
+                    batchsize=np.minimum(2*batchsize,len(data))
+                    numbatches=int(np.ceil(len(data)/batchsize))
+                    print("New batch size: ",batchsize)
+                    if method=="adam": # re-initialize the m and v vectors
+                        mf1=list(np.zeros((self.granularity,self.signature.unaries[i]-1))\
+                                 for i in self.attrange)
+                        mf2=np.zeros(shape=self.f2.shape)
+
+                        vf1=list(np.zeros((self.granularity,self.signature.unaries[i]-1))\
+                                 for i in self.attrange)
+                        vf2=np.zeros(shape=self.f2.shape)
             
             if with_trace:
                 trace['loglik'].append(epochll)
-                if self.numatts>0:
-                    trace['f1'].append(self.f1[0].copy())
-                trace['f2'].append(self.f2.copy())
                 
             terminate=(epochs==numepochs) or (noimprov==early_stop)
         
@@ -1538,7 +1716,7 @@ class AHK_graphon():
         terminate=False
         count=0
 
-        bestloglik=-math. inf
+        bestloglik=-math.inf
         bestmod=None
         
         if with_trace:
@@ -1550,6 +1728,8 @@ class AHK_graphon():
             trace['f2grad_norm']=[]
             trace['f1update_norm']=[]
             trace['f2update_norm']=[]
+        else:
+            trace=None
             
         while not terminate:
             mod,loglik,tr=self.learn_fixed_bins(settings,data,rng,**kwargs)
@@ -1563,18 +1743,28 @@ class AHK_graphon():
                 trace['f2update_norm']=trace['f2update_norm']+tr['f2update_norm']
 
             if loglik>bestloglik:
+                if loglik>(1-settings['bingain'])*bestloglik:
+                    self.set_f1(mod.f1)
+                    self.set_f2(mod.f2)
+                    self.splitbins()
+                else:
+                    terminate=True
+    
                 bestmod=mod
                 bestloglik=loglik
                 
-                self.set_f1(mod.f1)
-                self.set_f2(mod.f2)
-
                 if settings['learn_bins']:
                     self.binbounds=mod.binbounds
-                self.splitbins()
-
+                    
+                if settings['savepath']!= None:
+                    settings['loglik']=loglik
+                    timestamp=datetime.datetime.now().strftime("%d-%m-%Y_%H:%M:%S")
+                    outfile=open(settings['savepath']+"model_learned_"+str(self.granularity)+"_"+str(timestamp)+".pkl","wb")
+                    pkl.dump({"settings":settings,"model":bestmod},outfile)
+                    outfile.close()
             else:
-                terminate=True
+                terminate=True  
+            
            
             
 

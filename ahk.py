@@ -756,14 +756,18 @@ class AHK_graphon():
             
         UP=self.precompute_single_factors(w)
         BP=self.precompute_pair_factors(w)
-           
-        P_of_pi_b=self.get_bprobs(w.n)
 
-        b_to_idx=self.b_to_index(w.n)
+      
+        #P_of_pi_b=self.get_bprobs(w.n)
+  
+        
         if return_pibs or kwargs['sampler']=='uniform':
+            b_to_idx=self.b_to_index(w.n)
             idx_to_b=self.index_to_b(w.n)
         else:
+            b_to_idx=None
             idx_to_b=None
+            
             
         terminate=False
         sampled = 0
@@ -804,8 +808,8 @@ class AHK_graphon():
       
             p_pi_b=self.calculate_pi_b_precomp(pi,b,UP,BP)
             #worldweight=p_pi_b*P_of_pi_b[bidx[tuple(b)]]/(piprob*bprob)
-            worldweight=p_pi_b*P_of_pi_b[b_to_idx[tuple(b)]]/pibprob
-            
+            #worldweight=p_pi_b*P_of_pi_b[b_to_idx[tuple(b)]]/pibprob
+            worldweight=p_pi_b*self.volume(b,False)[0]/pibprob
             pw+=worldweight
             
             if not qs==None:

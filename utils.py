@@ -154,7 +154,6 @@ def nx_to_world(nxg,  featmaps=None):
         numatts=len(featmaps.keys())
         unaries=np.zeros(numatts,dtype=int)
         for i,k in enumerate(featmaps.keys()):
-            print(i,k)
             unaries[i]=len(featmaps[k].keys())
     
     sig=Signature(unaries,1,nx.is_directed(nxg))
@@ -291,4 +290,17 @@ def split3(p):
     
     q3=4*(p-0.5*q1-0.25*q2)
     return np.array((q1,q2,q3))
-    
+
+
+def get_densities_world(worlds):
+    """
+    Get the density of edges of all relations
+    It is assumed that for undirected graphs there is a full, symmetric
+    adjacency matrix (not only upper or lower triangle filled in)
+    """
+    nedges=np.zeros(worlds[0].sig.nb)
+    posedges=0
+    for w in worlds:
+        nedges+=np.sum(w.binaries,axis=(0,1))
+        posedges+=w.n*(w.n-1)
+    return nedges/posedges
